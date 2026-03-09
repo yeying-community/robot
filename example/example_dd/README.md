@@ -132,7 +132,7 @@ cd example/example_dd
 2. 准备本地配置：
 
 ```bash
-cp config/env.example .env.local
+cp .env.template .env.local
 ```
 
 3. 配置 OpenClaw + dingtalk 插件 + 模型：

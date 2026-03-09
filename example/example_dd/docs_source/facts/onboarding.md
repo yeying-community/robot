@@ -20,7 +20,7 @@ review_status: approved
 ## 准备步骤
 
 1. 安装 `Node.js 22+`
-2. 在 `example/example_dd/` 下复制 `config/env.example` 为 `.env.local`
+2. 在 `example/example_dd/` 下复制 `.env.template` 为 `.env.local`
 3. 执行 `bash scripts/configure_openclaw_dingtalk.sh`
 4. 执行 `bash scripts/run_openclaw_gateway.sh`
 5. 如需自定义群策略，可修改 `config/policy.example.json` 或在 `.env.local` 中覆盖 `DD_POLICY_PATH`
