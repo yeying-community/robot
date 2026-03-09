@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "project": "dd-bot",
+  "updated_at": "2026-03-09",
+  "answering": {
+    "required_for_topics": {
+      "environment": [
+        "INDEX.md",
+        "onboarding.md",
+        "dev-environment-standard.md",
+        "project-map.md",
+        "tooling-boundary.md"
+      ],
+      "faq": [
+        "INDEX.md",
+        "faq.md",
+        "access-and-permission.md",
+        "group-response-policy.md"
+      ],
+      "collaboration": [
+        "INDEX.md",
+        "release-process.md",
+        "summary-playbook.md",
+        "issue-and-wiki-playbook.md",
+        "calendar-and-meeting-policy.md",
+        "summary-template.md",
+        "issue-template.md",
+        "issue-draft-example.md",
+        "wiki-template.md",
+        "wiki-draft-example.md",
+        "meeting-template.md",
+        "meeting-preview-example.md",
+        "tooling-boundary.md",
+        "collab-output-rules.md",
+        "github-integration.md",
+        "dingtalk-calendar-integration.md",
+        "tool-execution-policy.md",
+        "rollback-policy.md",
+        "session-hygiene.md",
+        "knowledge-gap-policy.md",
+        "audit-and-observability.md"
+      ]
+    },
+    "disallowed_unverified_claims": [
+      "Node.js 18+",
+      "docker-compose up",
+      "npm install as the primary project startup path",
+      "automatic external writes without confirmation"
+    ],
+    "preferred_output": [
+      "结论",
+      "步骤",
+      "验证",
+      "来源"
+    ]
+  },
+  "authority": {
+    "high": [
+      "onboarding.md",
+      "dev-environment-standard.md",
+      "access-and-permission.md",
+      "tooling-boundary.md",
+      "dingtalk-calendar-integration.md",
+      "github-integration.md"
+    ],
+    "medium": [
+      "faq.md",
+        "release-process.md",
+        "group-response-policy.md",
+        "summary-playbook.md",
+        "issue-and-wiki-playbook.md",
+        "calendar-and-meeting-policy.md",
+        "knowledge-gap-policy.md",
+        "audit-and-observability.md"
+      ]
+  }
+}

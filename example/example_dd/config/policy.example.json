@@ -1,0 +1,113 @@
+{
+  "allowedConversationIds": [],
+  "admins": [
+    "mentor-demo"
+  ],
+  "writeAccess": {
+    "confirmers": [
+      "requester",
+      "admin"
+    ],
+    "requireAdminFor": [
+      "wiki"
+    ]
+  },
+  "routing": {
+    "githubRepos": [
+      {
+        "name": "yeying-rag",
+        "owner": "sheng1feng",
+        "repo": "yeying-rag-rebase",
+        "aliases": [
+          "yeying-rag",
+          "rag",
+          "知识检索",
+          "知识库"
+        ],
+        "conversationIds": []
+      }
+    ],
+    "wikiSpaces": [
+      {
+        "space": "platform",
+        "aliases": [
+          "平台",
+          "platform"
+        ]
+      },
+      {
+        "space": "rd",
+        "aliases": [
+          "研发",
+          "rd"
+        ]
+      }
+    ]
+  },
+  "autoReply": {
+    "requireAtBot": true,
+    "allowQuestionWithoutMention": false,
+    "maxContextMessages": 20,
+    "qaKeywords": [
+      "怎么",
+      "如何",
+      "为什么",
+      "在哪",
+      "环境",
+      "权限",
+      "流程",
+      "文档",
+      "onboarding"
+    ],
+    "summaryKeywords": [
+      "总结",
+      "梳理",
+      "摘要",
+      "复盘"
+    ],
+    "calendarKeywords": [
+      "开会",
+      "会议",
+      "日程",
+      "同步",
+      "约个会"
+    ],
+    "issueKeywords": [
+      "issue",
+      "bug",
+      "缺陷",
+      "报错",
+      "跟踪",
+      "任务"
+    ],
+    "wikiKeywords": [
+      "wiki",
+      "文档草稿",
+      "沉淀",
+      "整理成文档"
+    ],
+    "ignorePhrases": [
+      "收到",
+      "好的",
+      "ok",
+      "OK",
+      "收到啦",
+      "我看下",
+      "了解",
+      "1"
+    ]
+  },
+  "safety": {
+    "handoffKeywords": [
+      "线上事故",
+      "生产权限",
+      "敏感数据",
+      "紧急回滚"
+    ],
+    "confirmationRequired": [
+      "calendar",
+      "issue",
+      "wiki"
+    ]
+  }
+}
