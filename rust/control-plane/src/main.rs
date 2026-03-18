@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
-    env, fs,
-    io::{BufRead, BufReader},
+    env,
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Write},
     net::{SocketAddr, TcpListener},
     path::{Path as FsPath, PathBuf},
     process::Command,
@@ -167,6 +168,17 @@ struct InstanceLogsResponse {
     pair_qr_ascii: String,
     pair_status: String,
     pair_hint: Option<String>,
+    gateway_log_path: String,
+    pair_log_path: String,
+    events_log_path: String,
+    events_log: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EventLogEntry {
+    ts: String,
+    event: String,
+    detail: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -243,7 +255,7 @@ async fn main() {
         )
         .route(
             "/api/v1/public/bot/instances/{id}",
-            get(public_get_instance),
+            get(public_get_instance).delete(public_delete_instance),
         )
         .route(
             "/api/v1/public/bot/instances/{id}/model",
@@ -422,6 +434,47 @@ async fn persist_db(state: &AppState) -> Result<(), String> {
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+fn now_epoch_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+fn append_line(path: &str, line: &str) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open file for append failed {path}: {e}"))?;
+    writeln!(file, "{line}").map_err(|e| format!("append line failed {path}: {e}"))
+}
+
+fn append_log_banner(path: &str, banner: &str) {
+    let _ = append_line(path, "");
+    let _ = append_line(path, &format!("===== {banner} ====="));
+}
+
+fn write_instance_event(instance: &BotInstance, event: &str, detail: Value) {
+    let event_file = format!("{}/events.jsonl", instance.logs_dir);
+    let record = EventLogEntry {
+        ts: now_rfc3339(),
+        event: event.to_string(),
+        detail: json!({
+            "instance_id": instance.id.clone(),
+            "profile": instance.profile.clone(),
+            "kind": instance.kind.clone(),
+            "epoch_ms": now_epoch_ms(),
+            "data": detail,
+        }),
+    };
+    match serde_json::to_string(&record) {
+        Ok(raw) => {
+            if let Err(e) = append_line(&event_file, &raw) {
+                warn!("append events.jsonl failed for {}: {e}", instance.id);
+            }
+        }
+        Err(e) => warn!("serialize events.jsonl failed for {}: {e}", instance.id),
+    }
 }
 
 fn short_wallet(wallet: &str) -> String {
@@ -630,6 +683,63 @@ fn ensure_instance_dirs(instance: &BotInstance) -> Result<(), String> {
     fs::create_dir_all(root.join("logs")).map_err(|e| format!("create logs dir failed: {e}"))?;
     fs::create_dir_all(root.join("meta")).map_err(|e| format!("create meta dir failed: {e}"))?;
     Ok(())
+}
+
+fn archive_instance_paths(cfg: &StaticConfig, instance: &BotInstance) -> Result<Value, String> {
+    let root_dir = FsPath::new(&instance.root_dir);
+    let trash_root = FsPath::new(&cfg.runtime_dir).join("trash");
+    fs::create_dir_all(&trash_root).map_err(|e| format!("create trash dir failed: {e}"))?;
+
+    if !instance.root_dir.starts_with(&cfg.instances_root) {
+        return Err(format!(
+            "unsafe instance root_dir, expected under instances_root: {}",
+            instance.root_dir
+        ));
+    }
+
+    let ts = now_epoch_ms();
+    let id_slug = slugify(&instance.id);
+    let mut root_archive = trash_root.join(format!("{id_slug}-{ts}"));
+    let mut seq = 1_u32;
+    while root_archive.exists() {
+        root_archive = trash_root.join(format!("{id_slug}-{ts}-{seq}"));
+        seq += 1;
+    }
+
+    if root_dir.exists() {
+        fs::rename(root_dir, &root_archive).map_err(|e| {
+            format!(
+                "move instance root to trash failed: {} -> {} ({e})",
+                instance.root_dir,
+                root_archive.display()
+            )
+        })?;
+    }
+
+    let openclaw_home = profile_openclaw_home(&instance.profile);
+    let openclaw_home_path = FsPath::new(&openclaw_home);
+    let mut profile_archive: Option<String> = None;
+    if openclaw_home_path.exists() {
+        let mut target = trash_root.join(format!("openclaw-home-{}-{ts}", id_slug));
+        let mut profile_seq = 1_u32;
+        while target.exists() {
+            target = trash_root.join(format!("openclaw-home-{}-{}-{}", id_slug, ts, profile_seq));
+            profile_seq += 1;
+        }
+        fs::rename(openclaw_home_path, &target).map_err(|e| {
+            format!(
+                "move openclaw profile to trash failed: {} -> {} ({e})",
+                openclaw_home,
+                target.display()
+            )
+        })?;
+        profile_archive = Some(target.display().to_string());
+    }
+
+    Ok(json!({
+        "instance_root": root_archive.display().to_string(),
+        "openclaw_home": profile_archive,
+    }))
 }
 
 fn profile_openclaw_home(profile: &str) -> String {
@@ -973,36 +1083,102 @@ fn configure_profile(cfg: &StaticConfig, instance: &BotInstance) -> Result<(), S
 
 fn start_instance_process(instance: &BotInstance) -> Result<u32, String> {
     let log_file = format!("{}/gateway.log", instance.logs_dir);
+    append_log_banner(
+        &log_file,
+        &format!(
+            "{} start request profile={} port={}",
+            now_rfc3339(),
+            instance.profile,
+            instance.port
+        ),
+    );
+    write_instance_event(
+        instance,
+        "process_start_attempt",
+        json!({
+            "port": instance.port,
+            "log_file": log_file.clone(),
+        }),
+    );
+
     let command = format!(
-        "nohup openclaw --profile {} gateway run --allow-unconfigured --port {} > {} 2>&1 & echo $!",
+        "nohup openclaw --profile {} gateway run --allow-unconfigured --port {} >> {} 2>&1 & echo $!",
         instance.profile,
         instance.port,
         sh_quote(&log_file)
     );
 
-    let pid_text = run_shell(&command)?;
+    let pid_text = match run_shell(&command) {
+        Ok(v) => v,
+        Err(e) => {
+            write_instance_event(
+                instance,
+                "process_start_launch_failed",
+                json!({ "error": e }),
+            );
+            return Err(e);
+        }
+    };
+
     let launcher_pid = pid_text
         .trim()
         .parse::<u32>()
-        .map_err(|e| format!("parse pid failed from '{pid_text}': {e}"))?;
+        .map_err(|e| format!("parse pid failed from '{pid_text}': {e}"));
+    let launcher_pid = match launcher_pid {
+        Ok(pid) => pid,
+        Err(e) => {
+            write_instance_event(
+                instance,
+                "process_start_pid_parse_failed",
+                json!({ "pid_text": pid_text, "error": e }),
+            );
+            return Err(e);
+        }
+    };
 
     for _ in 0..24 {
         if let Some(pid) = find_gateway_pid_for_profile(&instance.profile) {
+            write_instance_event(
+                instance,
+                "process_start_ok",
+                json!({ "gateway_pid": pid, "launcher_pid": launcher_pid }),
+            );
             return Ok(pid);
         }
         thread::sleep(StdDuration::from_millis(250));
     }
 
+    write_instance_event(
+        instance,
+        "process_start_fallback_launcher_pid",
+        json!({ "launcher_pid": launcher_pid }),
+    );
     Ok(launcher_pid)
 }
 
 fn stop_instance_process(instance: &BotInstance) -> Result<(), String> {
+    let log_file = format!("{}/gateway.log", instance.logs_dir);
+    append_log_banner(
+        &log_file,
+        &format!("{} stop request profile={}", now_rfc3339(), instance.profile),
+    );
+    write_instance_event(
+        instance,
+        "process_stop_attempt",
+        json!({ "pid": instance.pid }),
+    );
+
+    let mut killed_pids: Vec<u32> = Vec::new();
     if let Some(pid) = instance.pid {
         let _ = run_shell(&format!("kill {} || true", pid));
+        killed_pids.push(pid);
     }
 
     if let Some(pid) = find_gateway_pid_for_profile(&instance.profile) {
         let _ = run_shell(&format!("kill {} || true", pid));
+        if !killed_pids.contains(&pid) {
+            killed_pids.push(pid);
+        }
     }
 
     let _ = run_shell(&format!(
@@ -1013,21 +1189,58 @@ fn stop_instance_process(instance: &BotInstance) -> Result<(), String> {
         ))
     ));
 
+    write_instance_event(
+        instance,
+        "process_stop_done",
+        json!({ "killed_pids": killed_pids }),
+    );
+
     Ok(())
 }
 
 fn launch_whatsapp_pair(instance: &BotInstance) -> Result<u32, String> {
     let log_file = format!("{}/pair.log", instance.logs_dir);
+    append_log_banner(
+        &log_file,
+        &format!("{} pair request profile={}", now_rfc3339(), instance.profile),
+    );
+    write_instance_event(
+        instance,
+        "pair_start_attempt",
+        json!({ "log_file": log_file.clone() }),
+    );
+
     let command = format!(
-        "nohup openclaw --profile {} channels login --channel whatsapp --verbose > {} 2>&1 & echo $!",
+        "nohup openclaw --profile {} channels login --channel whatsapp --verbose >> {} 2>&1 & echo $!",
         instance.profile,
         sh_quote(&log_file)
     );
-    let pid_text = run_shell(&command)?;
-    pid_text
+
+    let pid_text = match run_shell(&command) {
+        Ok(v) => v,
+        Err(e) => {
+            write_instance_event(instance, "pair_start_launch_failed", json!({ "error": e }));
+            return Err(e);
+        }
+    };
+
+    let pair_pid = pid_text
         .trim()
         .parse::<u32>()
-        .map_err(|e| format!("parse pair pid failed from '{pid_text}': {e}"))
+        .map_err(|e| format!("parse pair pid failed from '{pid_text}': {e}"));
+    let pair_pid = match pair_pid {
+        Ok(pid) => pid,
+        Err(e) => {
+            write_instance_event(
+                instance,
+                "pair_start_pid_parse_failed",
+                json!({ "pid_text": pid_text, "error": e }),
+            );
+            return Err(e);
+        }
+    };
+    write_instance_event(instance, "pair_start_ok", json!({ "pair_pid": pair_pid }));
+    Ok(pair_pid)
 }
 
 fn tail_file(path: &str, lines: usize) -> String {
@@ -1383,6 +1596,16 @@ async fn public_create_instance(
         return err(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
 
+    write_instance_event(
+        &instance,
+        "instance_created",
+        json!({
+            "template": selected_template,
+            "model": instance.model.clone(),
+            "port": instance.port,
+        }),
+    );
+
     if let Err(e) = persist_db(&state).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
@@ -1406,6 +1629,79 @@ async fn public_get_instance(
         None => return err(StatusCode::NOT_FOUND, "instance not found"),
     };
     ok(to_instance_view(instance))
+}
+
+async fn public_delete_instance(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let session = match require_user(&state, &headers).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+
+    refresh_instance_runtime(&state).await;
+
+    let snapshot = {
+        let db = state.db.read().await;
+        match db.instances.get(&id) {
+            Some(i) => i.clone(),
+            None => return err(StatusCode::NOT_FOUND, "instance not found"),
+        }
+    };
+
+    if snapshot.owner_wallet != session.wallet_id {
+        return err(
+            StatusCode::FORBIDDEN,
+            "permission denied: you can only delete your own instance",
+        );
+    }
+
+    let running_by_pid = snapshot.pid.map(is_pid_alive).unwrap_or(false);
+    let running_by_lock = find_gateway_pid_for_profile(&snapshot.profile).is_some();
+    if snapshot.status == "running" || running_by_pid || running_by_lock {
+        return err(
+            StatusCode::CONFLICT,
+            "instance is running, stop it before delete",
+        );
+    }
+
+    write_instance_event(
+        &snapshot,
+        "delete_requested",
+        json!({
+            "by_wallet": short_wallet(&session.wallet_id),
+            "status": snapshot.status,
+        }),
+    );
+
+    let archived = match archive_instance_paths(&state.cfg, &snapshot) {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("archive failed: {e}")),
+    };
+
+    {
+        let mut db = state.db.write().await;
+        if db.instances.remove(&id).is_none() {
+            return err(StatusCode::NOT_FOUND, "instance not found");
+        }
+    }
+
+    {
+        let mut marks = state.heal_marks.write().await;
+        marks.remove(&id);
+    }
+
+    if let Err(e) = persist_db(&state).await {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+
+    ok(json!({
+        "message": "deleted",
+        "id": id,
+        "archived": archived,
+    }))
 }
 
 async fn public_patch_instance_model(
@@ -1481,11 +1777,26 @@ async fn public_start_instance(
     if let Some(pid) = instance.pid {
         if is_pid_alive(pid) {
             instance.status = "running".to_string();
+            write_instance_event(
+                instance,
+                "start_skip_already_running",
+                json!({ "pid": pid }),
+            );
             let view = to_instance_view(instance);
             drop(db);
             return ok(json!({"message": "already running", "instance": view}));
         }
     }
+
+    write_instance_event(
+        instance,
+        "configure_start",
+        json!({
+            "kind": instance.kind.clone(),
+            "model": instance.model.clone(),
+            "port": instance.port,
+        }),
+    );
 
     instance.status = "starting".to_string();
     instance.last_error = None;
@@ -1494,6 +1805,7 @@ async fn public_start_instance(
     drop(db);
 
     if let Err(e) = configure_profile(&state.cfg, &snapshot) {
+        write_instance_event(&snapshot, "configure_fail", json!({ "error": e }));
         let mut db = state.db.write().await;
         if let Some(i) = db.instances.get_mut(&id) {
             i.status = "error".to_string();
@@ -1508,9 +1820,16 @@ async fn public_start_instance(
         );
     }
 
+    write_instance_event(
+        &snapshot,
+        "configure_ok",
+        json!({ "profile": snapshot.profile.clone(), "port": snapshot.port }),
+    );
+
     let pid = match start_instance_process(&snapshot) {
         Ok(pid) => pid,
         Err(e) => {
+            write_instance_event(&snapshot, "start_failed", json!({ "error": e }));
             let mut db = state.db.write().await;
             if let Some(i) = db.instances.get_mut(&id) {
                 i.status = "error".to_string();
@@ -1537,6 +1856,15 @@ async fn public_start_instance(
     let view = to_instance_view(instance);
     drop(db);
 
+    write_instance_event(
+        &snapshot,
+        "start_ok",
+        json!({
+            "pid": pid,
+            "port": snapshot.port,
+        }),
+    );
+
     if let Err(e) = persist_db(&state).await {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e);
     }
@@ -1562,6 +1890,7 @@ async fn public_stop_instance(
         None => return err(StatusCode::NOT_FOUND, "instance not found"),
     };
     drop(db);
+    write_instance_event(&snapshot, "stop_requested", json!({ "pid": snapshot.pid }));
 
     if let Err(e) = stop_instance_process(&snapshot) {
         return err(
@@ -1578,6 +1907,7 @@ async fn public_stop_instance(
         instance.last_error = None;
         let view = to_instance_view(instance);
         drop(db);
+        write_instance_event(&snapshot, "stop_done", json!({ "status": "stopped" }));
         if let Err(e) = persist_db(&state).await {
             return err(StatusCode::INTERNAL_SERVER_ERROR, e);
         }
@@ -1610,15 +1940,24 @@ async fn public_pair_whatsapp(
         );
     }
 
+    write_instance_event(
+        &instance,
+        "pair_requested",
+        json!({ "kind": instance.kind.clone() }),
+    );
+
     let pair_pid = match launch_whatsapp_pair(&instance) {
         Ok(pid) => pid,
         Err(e) => {
+            write_instance_event(&instance, "pair_launch_failed", json!({ "error": e }));
             return err(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("pair launch failed: {e}"),
             )
         }
     };
+
+    write_instance_event(&instance, "pair_started", json!({ "pair_pid": pair_pid }));
 
     ok(json!({
         "message": "pairing command started; open instance logs to view QR/pair output",
@@ -1644,9 +1983,14 @@ async fn public_instance_logs(
     };
     drop(db);
 
+    let gateway_log_path = format!("{}/gateway.log", instance.logs_dir);
+    let pair_log_path = format!("{}/pair.log", instance.logs_dir);
+    let events_log_path = format!("{}/events.jsonl", instance.logs_dir);
+
     let lines = query.lines.unwrap_or(120).clamp(20, 1000);
-    let gateway_log_raw = tail_file(&format!("{}/gateway.log", instance.logs_dir), lines);
-    let pair_log_raw = tail_file(&format!("{}/pair.log", instance.logs_dir), lines);
+    let gateway_log_raw = tail_file(&gateway_log_path, lines);
+    let pair_log_raw = tail_file(&pair_log_path, lines);
+    let events_log = tail_file(&events_log_path, lines);
 
     let gateway_log = strip_ansi_sequences(&gateway_log_raw);
     let pair_log = strip_ansi_sequences(&pair_log_raw);
@@ -1661,6 +2005,10 @@ async fn public_instance_logs(
         pair_qr_ascii,
         pair_status,
         pair_hint,
+        gateway_log_path,
+        pair_log_path,
+        events_log_path,
+        events_log,
     })
 }
 
@@ -1693,6 +2041,19 @@ async fn public_diagnose_instance(
         diagnose.auto_recover_triggered = triggered;
         diagnose.auto_recover_message = msg;
     }
+
+    write_instance_event(
+        &instance,
+        "diagnose_snapshot",
+        json!({
+            "recommended_action": diagnose.recommended_action.clone(),
+            "pair_status": diagnose.pair_status.clone(),
+            "gateway_reachable": diagnose.gateway_reachable,
+            "whatsapp_running": diagnose.whatsapp_running,
+            "whatsapp_connected": diagnose.whatsapp_connected,
+            "transport_established": diagnose.transport_established,
+        }),
+    );
 
     ok(diagnose)
 }
@@ -1976,6 +2337,17 @@ async fn trigger_auto_recover_if_needed(
         if let Some(last) = marks.get(&instance.id) {
             let elapsed = now.signed_duration_since(*last).num_seconds();
             if elapsed < AUTO_RECOVER_COOLDOWN_SECONDS {
+                write_instance_event(
+                    instance,
+                    "auto_recover_cooldown_skip",
+                    json!({
+                        "reason": reason,
+                        "elapsed_seconds": elapsed,
+                        "cooldown_seconds": AUTO_RECOVER_COOLDOWN_SECONDS,
+                        "retry_after_seconds": AUTO_RECOVER_COOLDOWN_SECONDS - elapsed,
+                    }),
+                );
+
                 return (
                     false,
                     Some(format!(
@@ -1992,16 +2364,60 @@ async fn trigger_auto_recover_if_needed(
         marks.insert(instance.id.clone(), now);
     }
 
+    write_instance_event(
+        instance,
+        "auto_recover_triggered",
+        json!({
+            "reason": reason,
+        }),
+    );
+
     if let Err(e) = stop_instance_process(instance) {
+        write_instance_event(
+            instance,
+            "auto_recover_stop_failed",
+            json!({
+                "reason": reason,
+                "error": e,
+            }),
+        );
         return (false, Some(format!("自动恢复停止失败: {e}")));
     }
     if let Err(e) = configure_profile(&state.cfg, instance) {
+        write_instance_event(
+            instance,
+            "auto_recover_configure_failed",
+            json!({
+                "reason": reason,
+                "error": e,
+            }),
+        );
         return (false, Some(format!("自动恢复重配失败: {e}")));
     }
+
     let new_pid = match start_instance_process(instance) {
         Ok(pid) => pid,
-        Err(e) => return (false, Some(format!("自动恢复重启失败: {e}"))),
+        Err(e) => {
+            write_instance_event(
+                instance,
+                "auto_recover_restart_failed",
+                json!({
+                    "reason": reason,
+                    "error": e,
+                }),
+            );
+            return (false, Some(format!("自动恢复重启失败: {e}")));
+        }
     };
+
+    write_instance_event(
+        instance,
+        "auto_recover_success",
+        json!({
+            "reason": reason,
+            "new_pid": new_pid,
+        }),
+    );
 
     let mut db = state.db.write().await;
     if let Some(i) = db.instances.get_mut(&instance.id) {
@@ -2115,7 +2531,22 @@ async fn auto_recover_tick(state: &AppState) -> Result<(), String> {
 
     for instance in instances {
         let diagnose = build_instance_diagnose(&instance);
-        let reason = diagnose.recommended_action.as_deref();
+        let reason_owned = diagnose.recommended_action.clone();
+        let reason = reason_owned.as_deref();
+        if reason.is_some() {
+            write_instance_event(
+                &instance,
+                "auto_recover_probe",
+                json!({
+                    "recommended_action": reason_owned.clone(),
+                    "pair_status": diagnose.pair_status.clone(),
+                    "gateway_reachable": diagnose.gateway_reachable,
+                    "whatsapp_running": diagnose.whatsapp_running,
+                    "whatsapp_connected": diagnose.whatsapp_connected,
+                    "transport_established": diagnose.transport_established,
+                }),
+            );
+        }
         let (triggered, msg) = trigger_auto_recover_if_needed(state, &instance, reason).await;
         if triggered {
             info!(

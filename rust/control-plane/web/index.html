@@ -59,7 +59,6 @@
     .status-other { color: var(--warn); font-weight: 700; }
     pre { margin: 0; min-height: 220px; max-width: 100%; background:#0b1220; color:#d1d5db; border:1px solid #1f2937; border-radius:10px; padding:12px; overflow:auto; font-family: "Cascadia Mono", "Consolas", "Courier New", monospace; }
     #logs { min-height: 260px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
-    #probe { min-height: 180px; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; margin-top: 10px; }
     #pairQr { min-height: 320px; background:#ffffff; color:#000000; border:1px solid #cbd5e1; font-size:10px; line-height:1; white-space:pre; }
     .tag.pair-linked { background:#ecfdf3; color:#0f9d58; border-color:#b7ebca; }
     .tag.pair-qr-ready { background:#eff6ff; color:#1d4ed8; border-color:#bfdbfe; }
@@ -221,7 +220,7 @@
       <div class="card">
         <div class="between">
           <h3>实例列表</h3>
-          <div class="muted">点击按钮可启动/停止/配对/查看日志</div>
+          <div class="muted">点击按钮可启动/停止/配对/查看日志/删除</div>
         </div>
         <div style="overflow:auto;">
           <table>
@@ -257,8 +256,6 @@
           <div>
             <div class="muted" style="margin-bottom:8px;">运行日志</div>
             <pre id="logs">暂无日志</pre>
-            <div class="muted" style="margin-top:10px;">链路验收探针</div>
-            <pre id="probe">暂无诊断结果。点击实例“诊断”查看当前链路状态与自动恢复建议。</pre>
           </div>
         </div>
       </div>
@@ -315,6 +312,22 @@ function pairStatusClass(status) {
   if (status === 'failed') return 'pair-failed';
   return 'pair-idle';
 }
+
+function resetLogPanel() {
+  state.currentLogInstanceId = null;
+  if (state.logTimer) {
+    clearInterval(state.logTimer);
+    state.logTimer = null;
+  }
+  document.getElementById('logTitle').textContent = '未选择实例';
+  document.getElementById('logs').textContent = '暂无日志';
+  document.getElementById('pairQr').textContent = '暂无可扫码二维码。请先点击实例“配对”。';
+  document.getElementById('pairHint').textContent = '点击“配对”后，二维码会在这里实时刷新。';
+  const pairStatusEl = document.getElementById('pairStatus');
+  pairStatusEl.textContent = pairStatusText('idle');
+  pairStatusEl.className = `tag ${pairStatusClass('idle')}`;
+}
+
 function extractModelIds(input) {
   const ids = new Set();
 
@@ -507,11 +520,7 @@ async function checkAuth() {
     return true;
   } catch (_) {
     state.me = null;
-    state.currentLogInstanceId = null;
-    if (state.logTimer) {
-      clearInterval(state.logTimer);
-      state.logTimer = null;
-    }
+    resetLogPanel();
     document.getElementById('appView').classList.add('hidden');
     document.getElementById('loginView').classList.remove('hidden');
     return false;
@@ -553,7 +562,7 @@ function renderInstances() {
           <button data-act="start" data-id="${inst.id}">启动</button>
           <button class="stop" data-act="stop" data-id="${inst.id}">停止</button>
           <button class="secondary" data-act="logs" data-id="${inst.id}">日志</button>
-          <button class="secondary" data-act="diagnose" data-id="${inst.id}">诊断</button>
+          <button class="secondary" data-act="delete" data-id="${inst.id}">删除</button>
           ${inst.kind === 'whatsapp' ? `<button class="warn" data-act="pair" data-id="${inst.id}">配对</button>` : ''}
         </div>
       </td>
@@ -586,8 +595,18 @@ function renderInstances() {
         if (act === 'logs') {
           await viewLogs(id);
         }
-        if (act === 'diagnose') {
-          await viewDiagnose(id);
+        if (act === 'delete') {
+          const confirmId = window.prompt(`输入实例ID确认删除：${id}`);
+          if (confirmId !== id) {
+            toast('删除已取消');
+            return;
+          }
+          await api('/api/v1/public/bot/instances/' + id, { method: 'DELETE' });
+          if (state.currentLogInstanceId === id) {
+            resetLogPanel();
+          }
+          toast(`实例 ${id} 已删除`);
+          await loadInstances();
         }
         if (act === 'set-model') {
           const model = document.getElementById(`model_${id}`).value.trim();
@@ -630,10 +649,6 @@ async function viewLogs(id, silent = false) {
     data.pair_hint || '点击“配对”后，二维码会在这里实时刷新。';
 
   if (!silent) {
-    viewDiagnose(id, true).catch(() => {});
-  }
-
-  if (!silent) {
     if (state.logTimer) {
       clearInterval(state.logTimer);
     }
@@ -641,42 +656,6 @@ async function viewLogs(id, silent = false) {
       if (state.currentLogInstanceId !== id) return;
       viewLogs(id, true).catch(() => {});
     }, 4000);
-  }
-}
-
-function formatEpochMs(ms) {
-  if (!ms) return '-';
-  const dt = new Date(ms);
-  if (Number.isNaN(dt.getTime())) return String(ms);
-  return dt.toLocaleString();
-}
-
-function renderDiagnoseText(d) {
-  const lines = [];
-  lines.push(`实例: ${d.id} (${d.kind})`);
-  lines.push(`状态: ${d.status}, pid=${d.pid || '-'}, port=${d.port}`);
-  lines.push(`网关: reachable=${d.gateway_reachable}, target=${d.gateway_target}`);
-  lines.push(`配对: ${d.pair_status} ${d.pair_hint ? `| ${d.pair_hint}` : ''}`);
-  lines.push(`WhatsApp: running=${d.whatsapp_running}, connected=${d.whatsapp_connected}`);
-  lines.push(`最后错误: ${d.whatsapp_last_error || 'null'}`);
-  lines.push(`入站/出站: ${formatEpochMs(d.last_inbound_at)} / ${formatEpochMs(d.last_outbound_at)}`);
-  lines.push(`传输层ESTAB: ${d.transport_established}`);
-  lines.push(`RouterKey: ${d.router_api_key_present}, NoApiKeyErr: ${d.no_api_key_error_seen}`);
-  lines.push(`建议动作: ${d.recommended_action || 'none'}`);
-  lines.push(`自动恢复: ${d.auto_recover_triggered ? 'triggered' : 'not-triggered'}${d.auto_recover_message ? ` | ${d.auto_recover_message}` : ''}`);
-  if (Array.isArray(d.evidence) && d.evidence.length) {
-    lines.push('');
-    lines.push('证据链:');
-    d.evidence.forEach((x, i) => lines.push(`${i + 1}. ${x}`));
-  }
-  return lines.join('\n');
-}
-
-async function viewDiagnose(id, silent = false) {
-  const data = await api(`/api/v1/public/bot/instances/${id}/diagnose`);
-  document.getElementById('probe').textContent = renderDiagnoseText(data);
-  if (!silent) {
-    toast(`实例 ${id} 诊断完成`);
   }
 }
 
