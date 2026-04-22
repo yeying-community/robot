@@ -593,6 +593,22 @@ fn sh_quote(v: &str) -> String {
     format!("'{}'", v.replace('\'', "'\\''"))
 }
 
+fn openclaw_prefix() -> Option<String> {
+    env::var("BOT_HUB_OPENCLAW_PREFIX")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn build_openclaw_cmd(profile: &str, args: &str) -> String {
+    let base = format!("openclaw --profile {} {}", profile, args);
+    if let Some(prefix) = openclaw_prefix() {
+        format!("{} {}", prefix, base)
+    } else {
+        base
+    }
+}
+
 fn run_shell(cmd: &str) -> Result<String, String> {
     let output = Command::new("bash")
         .arg("-lc")
@@ -1101,12 +1117,11 @@ fn start_instance_process(instance: &BotInstance) -> Result<u32, String> {
         }),
     );
 
-    let command = format!(
-        "nohup openclaw --profile {} gateway run --allow-unconfigured --port {} >> {} 2>&1 & echo $!",
-        instance.profile,
-        instance.port,
-        sh_quote(&log_file)
+    let openclaw_cmd = build_openclaw_cmd(
+        &instance.profile,
+        &format!("gateway run --allow-unconfigured --port {}", instance.port),
     );
+    let command = format!("nohup {} >> {} 2>&1 & echo $!", openclaw_cmd, sh_quote(&log_file));
 
     let pid_text = match run_shell(&command) {
         Ok(v) => v,
@@ -1210,11 +1225,11 @@ fn launch_whatsapp_pair(instance: &BotInstance) -> Result<u32, String> {
         json!({ "log_file": log_file.clone() }),
     );
 
-    let command = format!(
-        "nohup openclaw --profile {} channels login --channel whatsapp --verbose >> {} 2>&1 & echo $!",
-        instance.profile,
-        sh_quote(&log_file)
+    let openclaw_cmd = build_openclaw_cmd(
+        &instance.profile,
+        "channels login --channel whatsapp --verbose",
     );
+    let command = format!("nohup {} >> {} 2>&1 & echo $!", openclaw_cmd, sh_quote(&log_file));
 
     let pid_text = match run_shell(&command) {
         Ok(v) => v,
