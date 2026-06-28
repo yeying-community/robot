@@ -14,7 +14,7 @@ Hub 是本仓库的唯一生产控制入口：
 ```text
 hub/
   backend/
-    .env.example
+    .env.template
     pyproject.toml
     src/hub/
   frontend/
@@ -30,19 +30,11 @@ scripts/
   starter.sh
   package.sh
   bootstrap_full_stack.sh
-  deploy_full_stack.sh
   doctor_full_stack.sh
   setup/openclaw_prepare.sh
 ```
 
 ## 3. 启动（推荐）
-
-```bash
-cd /home/administrator/code/hub
-bash scripts/deploy_full_stack.sh
-```
-
-或分步执行：
 
 ```bash
 cd /home/administrator/code/hub
@@ -72,13 +64,58 @@ bash scripts/starter.sh stop
 bash scripts/starter.sh restart
 ```
 
-## 5. 兼容入口（已降级）
+## 5. 本地开发
 
-以下脚本仍可用，但仅做兼容转发，不再是主路径：
+开发阶段建议前后端分进程启动：
 
-- `scripts/run_full_stack.sh`
-- `scripts/stop_full_stack.sh`
-- `scripts/status_full_stack.sh`
+本地 backend 配置文件：
+
+```bash
+cp hub/backend/.env.template hub/backend/.env
+```
+
+`.env` 只用于本地开发，不提交到远端。
+
+启动 backend：
+
+```bash
+cd hub/backend
+uv run python -m uvicorn hub.app:create_app --factory --reload --host 127.0.0.1 --port 3900
+```
+
+启动 frontend：
+
+```bash
+cd hub/frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+前端开发服务器会把 `/api` 代理到 `http://127.0.0.1:3900`。
+
+停止开发服务：
+
+- 正常停止：在 backend 和 frontend 各自终端里按 `Ctrl+C`
+- 如果端口被旧进程占用，可手动清理：
+
+```bash
+lsof -tiTCP:3900 -sTCP:LISTEN | xargs kill
+lsof -tiTCP:5173 -sTCP:LISTEN | xargs kill
+```
+
+打包或部署后的生命周期操作统一使用 `scripts/starter.sh`。
+
+测试命令：
+
+```bash
+cd hub/backend
+uv run python -m unittest discover -s tests
+```
+
+```bash
+cd hub/frontend
+npm run build
+```
 
 ## 6. 核心接口分层
 
@@ -120,15 +157,15 @@ bash scripts/starter.sh restart
 ### Q1: 浏览器打开 127.0.0.1:3900 连接被拒绝
 
 ```bash
-bash scripts/status_full_stack.sh
 bash scripts/starter.sh start
+curl -sS http://127.0.0.1:3900/api/v1/public/health
 ```
 
 ### Q2: 模型拉取失败
 
 ```bash
 bash scripts/doctor_full_stack.sh
-# 检查 config/hub.env 中 ROUTER_API_KEY
+# 检查 config/hub.env 或 hub/backend/.env 中 ROUTER_API_KEY
 ```
 
 ### Q3: WhatsApp 配对后不回消息

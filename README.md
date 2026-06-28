@@ -4,11 +4,11 @@
 
 Robot 当前的主产品形态是 **Hub 控制平面**，用于统一部署、管理和编排多种机器人实例，并动态装配技能、工具与渠道能力。
 
-当前仓库里保留了运行时代码、OpenClaw 相关联代码、运维脚本和历史参考材料。为了避免误解，先给出主入口：
+当前仓库里保留了 Hub 控制面、机器人定义、运维脚本和历史参考材料。主入口：
 
 - **当前生产入口**：`hub/`
-- **标准启动脚本**：`scripts/starter.sh`
-- **标准打包脚本**：`scripts/package.sh`
+- **生产启停**：`scripts/starter.sh`
+- **生产打包**：`scripts/package.sh`
 - **仓库结构说明**：`docs/repository-layout.md`
 
 ### 项目简介
@@ -26,19 +26,18 @@ Robot 当前的主产品形态是 **Hub 控制平面**，用于统一部署、�
 - Hub 负责“机器人编排与运维”
 
 ### 功能特性
-- ✅ Web 控制台（钱包登录 + 实例管理）
-- ✅ 多实例隔离（profile/端口/目录）
-- ✅ WhatsApp 配对日志与二维码展示
-- ✅ 实例诊断与自动恢复（WhatsApp）
-- ✅ Router 模型统一配置
-- ✅ 标准启动脚本：`scripts/starter.sh`
-- ✅ 标准打包脚本：`scripts/package.sh`
-- ✅ Legacy 文档归档到 `docs/archive/legacy/`
+- Web 控制台（钱包登录 + 实例管理）
+- 多实例隔离（profile/端口/目录）
+- WhatsApp 配对日志与二维码展示
+- 实例诊断与自动恢复（WhatsApp）
+- Router 模型统一配置
+- 标准生产启停脚本：`scripts/starter.sh`
+- 标准生产打包脚本：`scripts/package.sh`
 
 ## 仓库分区
 
 - `hub/`：当前 Hub 控制平面服务和 Web 控制台
-- `scripts/`：部署、启动、打包、体检、验证脚本
+- `scripts/`：Hub 启停、打包、体检、OpenClaw 准备和协作脚本
 - `config/`：当前运行配置模板
 - `docs/`：当前设计文档和运维手册
 - `robots/openclaw/`：当前受控机器人实现目录，包含基于 OpenClaw 的机器人子系统
@@ -59,30 +58,9 @@ Robot 当前的主产品形态是 **Hub 控制平面**，用于统一部署、�
 | Python | >= 3.11 | Hub Python 控制面 |
 | uv | 最新稳定版 | Python 依赖同步与运行入口 |
 
-### 安装步骤
-
-1. **克隆项目**
-```bash
-git clone git@github.com:ShengNW/bot.git
-cd bot
-```
-
-2. **一键部署（推荐）**
-```bash
-bash scripts/deploy_full_stack.sh
-```
-
-3. **打开控制台**
-- 浏览器访问：`http://127.0.0.1:3900/`
-- 连接钱包后即可创建实例。
-
-4. **首次创建 WhatsApp 实例后配对**
-- 在实例行点击“配对”
-- 在日志面板扫码完成 linked
-
 ### 配置说明
 
-主配置文件：`config/hub.env`
+生产服务配置文件：`config/hub.env`
 
 关键变量：
 
@@ -102,28 +80,94 @@ HUB_INSTANCE_PORT_START=18800
 HUB_INSTANCE_PORT_END=18999
 ```
 
-> `scripts/bootstrap_full_stack.sh` 会自动从模板创建该文件。
+> `scripts/bootstrap_full_stack.sh` 会自动从模板创建这个生产服务配置文件。
 
 - `HUB_PUBLIC_BASE_URL`：线上建议填写控制台真实 HTTPS 地址，用于钱包签名 challenge 的 `domain` 和 `uri`
 - `HUB_SESSION_COOKIE_SECURE_MODE`：支持 `auto` / `always` / `never`，默认 `auto`
 
 ## 本地开发
 
-### 开发环境搭建
+本地开发以快速启动和热更新为主，前后端分进程运行。
+
+### 1. 准备依赖
 
 ```bash
 bash scripts/bootstrap_full_stack.sh
 ```
 
-可选：仅准备 OpenClaw
+本地 backend 配置文件：
 
 ```bash
-bash scripts/setup/openclaw_prepare.sh install
-bash scripts/setup/openclaw_prepare.sh configure
-bash scripts/setup/openclaw_prepare.sh patch
+cp hub/backend/.env.template hub/backend/.env
 ```
 
-### 运行项目
+`.env` 只用于本地开发 backend，不提交到远端。
+
+### 2. 启动 backend
+
+```bash
+cd hub/backend
+uv run python -m uvicorn hub.app:create_app --factory --reload --host 127.0.0.1 --port 3900
+```
+
+### 3. 启动 frontend
+
+```bash
+cd hub/frontend
+npm install
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+访问：`http://127.0.0.1:5173/`
+
+Vite 会把 `/api` 代理到 `http://127.0.0.1:3900`。
+
+### 4. 停止开发服务
+
+- 正常停止：在 backend 和 frontend 各自终端里按 `Ctrl+C`
+- 如果端口被旧进程占用，可手动清理：
+
+```bash
+lsof -tiTCP:3900 -sTCP:LISTEN | xargs kill
+lsof -tiTCP:5173 -sTCP:LISTEN | xargs kill
+```
+
+### 5. 快速测试
+
+```bash
+cd hub/backend
+uv run python -m unittest discover -s tests
+```
+
+```bash
+cd hub/frontend
+npm run build
+```
+
+```bash
+curl -sS http://127.0.0.1:3900/api/v1/public/health
+```
+
+## 生产部署
+
+生产部署以构建产物和 `scripts/starter.sh` 为主。
+
+### 1. 准备配置
+
+```bash
+cp config/hub.env.template config/hub.env
+```
+
+编辑 `config/hub.env`，至少填入 `ROUTER_API_KEY`。
+这个文件用于打包后的服务运行，不用于本地开发 backend 直启。
+
+### 2. 构建运行依赖和前端产物
+
+```bash
+bash scripts/bootstrap_full_stack.sh
+```
+
+### 3. 启停 Hub
 
 ```bash
 bash scripts/starter.sh start
@@ -131,52 +175,19 @@ bash scripts/starter.sh restart
 bash scripts/starter.sh stop
 ```
 
-### 调试方法
+访问：`http://127.0.0.1:3900/`
+
+### 4. 打包发布
+
+在构建机执行：
 
 ```bash
-# 基础体检
-bash scripts/doctor_full_stack.sh
-
-# 服务状态（兼容入口）
-bash scripts/status_full_stack.sh
-
-# 健康接口
-curl -sS http://127.0.0.1:3900/api/v1/public/health
-
-# 若出现 "openclaw: command not found"，执行下面修复
-OPENCLAW_BIN="$(npm config get prefix)/bin/openclaw"
-if [[ -x "$OPENCLAW_BIN" ]]; then
-  sudo ln -sf "$OPENCLAW_BIN" /usr/local/bin/openclaw
-  openclaw --version
-fi
-```
-
-## 生产部署
-
-### 部署前准备
-
-- [ ] `config/hub.env` 已配置 `ROUTER_API_KEY`
-- [ ] OpenClaw 可执行：`openclaw --version`
-- [ ] 机器网络满足 Router 与通道连接要求
-- [ ] 已完成钱包登录链路可用性验证
-
-### 部署步骤
-
-#### 方式一：源码部署（推荐内网研发）
-
-```bash
-git clone git@github.com:ShengNW/bot.git
-cd bot
-bash scripts/deploy_full_stack.sh
-```
-
-#### 方式二：安装包部署（无需 Rust）
-
-```bash
-# 在构建机打包
 bash scripts/package.sh
+```
 
-# 在目标机解压后
+安装包输出到 `output/`。目标机解压后：
+
+```bash
 cd <pkg-dir>
 cp config/hub.env.template config/hub.env
 # 编辑 config/hub.env
@@ -184,48 +195,38 @@ bash scripts/bootstrap_full_stack.sh
 bash scripts/starter.sh start
 ```
 
-### 环境变量配置
-
-见 `config/hub.env`（源码）或 `config/hub.env.template`（安装包）。
-
-### 健康检查
+### 5. 生产检查
 
 ```bash
 curl -sS http://127.0.0.1:3900/api/v1/public/health
 curl -sS http://127.0.0.1:3900/api/v1/public/version
+bash scripts/doctor_full_stack.sh
 ```
 
-## API文档
-- 控制平面总览：`docs/hub.md`
-- 详细设计：`docs/hub-control-plane-detailed-design.md`
-- GitHub Issue 机器人方案：`docs/github机器人方案.md`
-- GitHub Issue 机器人部署手册：`docs/github机器人部署手册.md`
-- 旧单 profile 手册（归档）：`docs/archive/legacy/`
+### 6. OpenClaw 准备
 
-## 测试
+通常 `scripts/bootstrap_full_stack.sh` 会自动安装 OpenClaw。需要单独操作时使用：
 
 ```bash
-# 1) 启动可用
-bash scripts/starter.sh start
-
-# 2) 健康可用
-curl -sS http://127.0.0.1:3900/api/v1/public/health
-
-# 3) 页面可访问
-curl -sSI http://127.0.0.1:3900/ | head -n 5
+bash scripts/setup/openclaw_prepare.sh install
+bash scripts/setup/openclaw_prepare.sh configure
+bash scripts/setup/openclaw_prepare.sh patch
 ```
 
-## 贡献指南
+## 常用脚本
 
-1. **提交规范**
-- 使用：`<type>(scope): <summary>`
-- 示例：`docs(readme): 收口 bot 平面启动路径`
+```bash
+scripts/bootstrap_full_stack.sh          # 准备 Python 依赖、前端构建产物、OpenClaw 和配置文件
+scripts/starter.sh start|stop|restart    # 生产启停 Hub
+scripts/package.sh                       # 打包发布包
+scripts/doctor_full_stack.sh             # 生产体检
+scripts/setup/openclaw_prepare.sh        # OpenClaw 安装、配置和补丁
+scripts/sync.sh                          # 同步 fork/main
+scripts/pr.sh                            # 创建或复用 PR
+```
 
-2. **提交要求**
-- 不提交任何真实密钥
-- 不破坏 `scripts/starter.sh` / `scripts/package.sh` 主路径
-- 若改动接口，更新 `docs/hub.md`
+## API 文档
 
-3. **Legacy 处理原则**
-- 旧路径先“降级兼容”，再“物理删除”
-- 删除前需给出回滚路径与验证记录
+- 控制平面总览：`docs/hub.md`
+- 详细设计：`docs/hub-control-plane-detailed-design.md`
+- 旧文档归档：`docs/archive/legacy/`

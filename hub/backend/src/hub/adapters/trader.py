@@ -117,6 +117,22 @@ class TraderAdapter:
         return "\n".join(lines[-limit:])
 
     @staticmethod
+    def pick_text(payload: dict[str, Any], keys: list[str]) -> str | None:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    @staticmethod
+    def pick_number(payload: dict[str, Any], keys: list[str]) -> float | int | None:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, (int, float)):
+                return value
+        return None
+
+    @staticmethod
     def read_trader_strategies(path: Path) -> list[Any]:
         if not path.exists():
             return []
@@ -128,6 +144,98 @@ class TraderAdapter:
             return []
         strategies = parsed.get("strategies", [])
         return strategies if isinstance(strategies, list) else []
+
+    def build_strategy_snapshots(
+        self,
+        strategies: list[Any],
+        state: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], int, str | None, str | None, str | None, str | None]:
+        strategy_state_map = state.get("strategies", {})
+        if not isinstance(strategy_state_map, dict):
+            strategy_state_map = {}
+
+        snapshots: list[dict[str, Any]] = []
+        total_position_quantity = 0
+        last_run_at: str | None = None
+        last_action: str | None = None
+        last_reason: str | None = None
+        last_snapshot_path: str | None = None
+
+        for strategy in strategies:
+            if not isinstance(strategy, dict):
+                continue
+
+            strategy_id = str(strategy.get("id", "")).strip()
+            runtime_state = strategy_state_map.get(strategy_id, {})
+            if not isinstance(runtime_state, dict):
+                runtime_state = {}
+
+            strategy_state = runtime_state.get("strategyState", {})
+            if not isinstance(strategy_state, dict):
+                strategy_state = {}
+
+            position_quantity = 0
+            for candidate in (
+                strategy_state.get("remaining_quantity"),
+                runtime_state.get("position_quantity"),
+                strategy.get("position_quantity"),
+            ):
+                if isinstance(candidate, int):
+                    position_quantity = max(position_quantity, candidate)
+
+            total_position_quantity += position_quantity
+
+            observed_at = self.pick_text(runtime_state, ["observedAt", "observed_at"])
+            snapshot = {
+                "id": strategy_id,
+                "name": str(strategy.get("name") or strategy_id or "-"),
+                "symbol": str(strategy.get("symbol") or runtime_state.get("symbol") or "-"),
+                "strategy": str(strategy.get("strategy") or runtime_state.get("strategy") or "-"),
+                "timeframe": str(strategy.get("timeframe") or "-"),
+                "enabled": bool(strategy.get("enabled", True)),
+                "lastAction": self.pick_text(runtime_state, ["lastAction", "last_action"]) or "-",
+                "lastReason": self.pick_text(runtime_state, ["lastReason", "last_reason"]) or "-",
+                "latestPrice": self.pick_number(runtime_state, ["latestPrice", "latest_price"]),
+                "observedAt": observed_at,
+                "riskOk": runtime_state.get("riskOk"),
+                "riskReason": self.pick_text(runtime_state, ["riskReason", "risk_reason"]),
+                "positionQuantity": position_quantity,
+            }
+            snapshots.append(snapshot)
+
+            if observed_at and (last_run_at is None or observed_at > last_run_at):
+                last_run_at = observed_at
+                last_action = str(snapshot["lastAction"])
+                last_reason = str(snapshot["lastReason"])
+                snapshot_path = runtime_state.get("snapshotPath")
+                last_snapshot_path = str(snapshot_path) if isinstance(snapshot_path, str) and snapshot_path.strip() else None
+
+        return snapshots, total_position_quantity, last_run_at, last_action, last_reason, last_snapshot_path
+
+    @staticmethod
+    def read_last_cycle_metrics(service_log_path: Path) -> tuple[int, int]:
+        if not service_log_path.exists():
+            return 0, 0
+        try:
+            lines = service_log_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return 0, 0
+
+        for line in reversed(lines):
+            marker = "cycle result="
+            if marker not in line:
+                continue
+            payload_text = line.split(marker, 1)[1].strip()
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                return 0, 0
+            strategy_count = payload.get("strategyCount")
+            if not isinstance(strategy_count, int):
+                return 0, 0
+            # Current trader runtime performs 1 realtime quote request and 1 history request per enabled strategy.
+            return strategy_count, strategy_count * 2
+        return 0, 0
 
     @staticmethod
     def trader_pid(runtime_dir: Path) -> int | None:
@@ -167,6 +275,19 @@ class TraderAdapter:
                 recent_signals=[],
                 recent_orders=[],
                 service_log_tail="",
+                strategy_count=0,
+                signal_count=0,
+                order_count=0,
+                last_signal_at=None,
+                last_order_at=None,
+                last_run_at=None,
+                last_action=None,
+                last_reason=None,
+                active_position_quantity=0,
+                strategy_snapshots=[],
+                last_cycle_strategy_count=0,
+                last_cycle_request_count=0,
+                last_snapshot_path=None,
             )
 
         env_values = self.read_env_values()
@@ -180,6 +301,17 @@ class TraderAdapter:
         signals_file = runtime_dir / "signals.jsonl"
         orders_file = runtime_dir / "orders.jsonl"
         service_log_path = runtime_dir / "logs" / "service.log"
+        strategies = self.read_trader_strategies(strategy_file)
+        state = self.read_json_file_or_default(state_file)
+        recent_signals = self.read_jsonl_tail(signals_file, 8)
+        recent_orders = self.read_jsonl_tail(orders_file, 8)
+        strategy_snapshots, active_position_quantity, last_run_at, last_action, last_reason, last_snapshot_path = self.build_strategy_snapshots(
+            strategies,
+            state,
+        )
+        last_signal_at = self.pick_text(recent_signals[-1], ["ts", "timestamp", "created_at", "time"]) if recent_signals else None
+        last_order_at = self.pick_text(recent_orders[-1], ["ts", "timestamp", "created_at", "time"]) if recent_orders else None
+        last_cycle_strategy_count, last_cycle_request_count = self.read_last_cycle_metrics(service_log_path)
 
         return RobotWorkspaceSummaryResponse(
             available=True,
@@ -190,21 +322,40 @@ class TraderAdapter:
             strategy_file=str(strategy_file),
             state_file=str(state_file),
             service_log_path=str(service_log_path),
-            strategies=self.read_trader_strategies(strategy_file),
-            state=self.read_json_file_or_default(state_file),
-            recent_signals=self.read_jsonl_tail(signals_file, 8),
-            recent_orders=self.read_jsonl_tail(orders_file, 8),
+            strategies=strategies,
+            state=state,
+            recent_signals=recent_signals,
+            recent_orders=recent_orders,
             service_log_tail=self.read_text_tail(service_log_path, 40),
+            strategy_count=len(strategy_snapshots),
+            signal_count=len(recent_signals),
+            order_count=len(recent_orders),
+            last_signal_at=last_signal_at,
+            last_order_at=last_order_at,
+            last_run_at=last_run_at,
+            last_action=last_action,
+            last_reason=last_reason,
+            active_position_quantity=active_position_quantity,
+            strategy_snapshots=strategy_snapshots,
+            last_cycle_strategy_count=last_cycle_strategy_count,
+            last_cycle_request_count=last_cycle_request_count,
+            last_snapshot_path=last_snapshot_path,
         )
 
-    def update_config(self, broker: str, strategy: dict[str, Any]) -> RobotWorkspaceConfigUpdateResponse:
+    def update_config(
+        self,
+        broker: str,
+        strategy: dict[str, Any],
+        strategy_id: str | None = None,
+    ) -> RobotWorkspaceConfigUpdateResponse:
         normalized_broker = broker.strip().lower()
         if normalized_broker not in {"paper", "eastmoney_stub"}:
             raise ValueError("trader broker must be paper or eastmoney_stub")
 
-        strategy_id = str(strategy.get("id", "")).strip()
+        target_strategy_id = str(strategy_id or "").strip()
+        next_strategy_id = str(strategy.get("id", "")).strip()
         symbol = str(strategy.get("symbol", "")).strip()
-        if not strategy_id or not symbol:
+        if not next_strategy_id or not symbol:
             raise ValueError("strategy id and symbol are required")
 
         env_values = self.read_env_values()
@@ -214,7 +365,25 @@ class TraderAdapter:
 
         strategy_path = self.strategy_file(env_values)
         strategy_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"strategies": [strategy]}
+        strategies = self.read_trader_strategies(strategy_path)
+        saved = False
+        payload_strategies: list[Any] = []
+        match_id = target_strategy_id or next_strategy_id
+        for item in strategies:
+            if not isinstance(item, dict):
+                payload_strategies.append(item)
+                continue
+            current_id = str(item.get("id", "")).strip()
+            if current_id == match_id:
+                payload_strategies.append(strategy)
+                saved = True
+            else:
+                payload_strategies.append(item)
+
+        if not saved:
+            payload_strategies.append(strategy)
+
+        payload = {"strategies": payload_strategies}
         strategy_path.write_text(
             yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
@@ -223,7 +392,7 @@ class TraderAdapter:
         return RobotWorkspaceConfigUpdateResponse(
             saved=True,
             broker=normalized_broker,
-            strategyCount=1,
+            strategyCount=len(payload_strategies),
         )
 
     def run_action(self, action: str) -> RobotWorkspaceActionResponse:

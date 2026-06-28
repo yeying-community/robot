@@ -33,6 +33,38 @@ hub/backend/
 
 当前目录已经接管默认运行入口。
 
+## 本地开发
+
+本地配置：
+
+```bash
+cp hub/backend/.env.template hub/backend/.env
+```
+
+`.env` 只用于本地开发 backend，不提交到远端。
+
+启动：
+
+```bash
+cd hub/backend
+uv run python -m uvicorn hub.app:create_app --factory --reload --host 127.0.0.1 --port 3900
+```
+
+停止：在运行 backend 的终端里按 `Ctrl+C`。如果端口被旧进程占用，可执行：
+
+```bash
+lsof -tiTCP:3900 -sTCP:LISTEN | xargs kill
+```
+
+部署或打包后的启动、停止、重启统一使用仓库根目录下的 `scripts/starter.sh`。
+
+## 测试
+
+```bash
+cd hub/backend
+uv run python -m unittest discover -s tests
+```
+
 后续迁移建议：
 
 1. 继续收敛控制面脚本和打包链路
